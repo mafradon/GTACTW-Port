@@ -1,0 +1,46 @@
+# gptokeyb mapping for GTA: Chinatown Wars
+#
+# NOT USED BY DEFAULT. The game reads the controller natively through the SDL
+# GameController API and honours PortMaster's per-device mapping via
+# $SDL_GAMECONTROLLERCONFIG, so the launcher leaves gptokeyb off
+# (USE_GPTOKEYB=0) to avoid it EVIOCGRAB-ing the pad away from the game.
+#
+# The Start+Select quit combo does NOT come from this file:
+#   * with gptokeyb off, the game implements it itself (see ProcessEvents()
+#     in src/main.c);
+#   * with gptokeyb on, it comes from the application name passed as the first
+#     argument ($GPTOKEYB "gtactw.armhf"), which is what gptokeyb's built-in
+#     kill watches — "hotkey = select" below only selects the hotkey MODIFIER
+#     for any *_hk bindings, it cannot define the kill combo.
+#
+# The keyboard mappings are a harmless fallback (the engine ignores keyboard
+# input). Enable gptokeyb only if a device turns out to need it.
+
+back = esc
+start = enter
+guide = enter
+
+a = x
+b = z
+x = c
+y = v
+
+l1 = a
+r1 = s
+l2 = q
+r2 = w
+l3 = 1
+r3 = 2
+
+up = up
+down = down
+left = left
+right = right
+
+left_analog_up = up
+left_analog_down = down
+left_analog_left = left
+left_analog_right = right
+
+# Start + Select quits the game.
+hotkey = select

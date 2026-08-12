@@ -1,0 +1,30 @@
+{
+    "version": 2,
+    "name": "gtactw.zip",
+    "items": [
+        "GTA Chinatown Wars.sh",
+        "gtactw"
+    ],
+    "items_opt": null,
+    "attr": {
+        "title": "Grand Theft Auto: Chinatown Wars",
+        "desc": "Native 32-bit ARM port of the Android version of Grand Theft Auto: Chinatown Wars, running the original libCTW.so engine through a custom Android-on-Linux loader (KMS/DRM, GLES2, OpenAL). You must supply your own copy of the game's APK and OBB; they are extracted on first launch.",
+        "inst": "Copy main.4.com.rockstargames.gtactw.obb and gtacw.apk into this port's gtactw/ folder, then launch. First run extracts the data and deletes the archives.",
+        "genres": [
+            "action",
+            "adventure"
+        ],
+        "porter": [
+            "mafradon"
+        ],
+        "image": {
+            "screenshot": "screenshot.png"
+        },
+        "rtr": true,
+        "runtime": null,
+        "reqs": [],
+        "arch": [
+            "armhf"
+        ]
+    }
+}

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+  <game>
+    <path>./GTA Chinatown Wars.sh</path>
+    <name>Grand Theft Auto: Chinatown Wars</name>
+    <desc>Native 32-bit ARM port of the Android version of GTA: Chinatown Wars, running the original engine through a custom Android-on-Linux loader. Supply your own APK + OBB; extracted on first launch.</desc>
+    <releasedate>20100317T000000</releasedate>
+    <developer>Rockstar Leeds</developer>
+    <publisher>Rockstar Games</publisher>
+    <genre>Action / Adventure</genre>
+    <image>./screenshot.png</image>
+  </game>
+</gameList>

@@ -29,3 +29,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Built port binaries (shipped in the release zip, not in git)
+*.armhf
+gtactw_r36.pm
+bullseye-sysroot/
+scripts/__pycache__/

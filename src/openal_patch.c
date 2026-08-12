@@ -28,13 +28,81 @@ typedef int   ALCint;
 
 static ALCcontext *(*real_alcCreateContext)(ALCdevice *, const ALCint *) = NULL;
 
-static ALCcontext *alcCreateContextHook(ALCdevice *dev, const ALCint *unused) {
-    (void)unused;
+static ALCcontext *alcCreateContextHook(ALCdevice *dev, const ALCint *requested) {
+    /* The game passes no attributes of its own (verified on-device), so this
+     * only pins the output rate rather than overriding anything it asked for. */
+    (void)requested;
     const ALCint attr[] = { ALC_FREQUENCY, 44100, 0 };
     if (real_alcCreateContext)
         return real_alcCreateContext(dev, attr);
     return NULL;
 }
+
+/* ── soft-float ABI bridges ──────────────────────────────────────────────
+ *
+ * libCTW.so is armeabi-v7a = **soft-float**: float and double arguments (and
+ * return values) travel in the general-purpose registers. This binary and the
+ * system OpenAL are **hard-float**, using s0-s15 / d0-d7. Every hooked entry
+ * point taking or returning a float by value therefore needs a thunk, or the
+ * callee reads a register the caller never wrote.
+ *
+ * It fails intermittently rather than outright, which is what makes it nasty:
+ * soft-float code computes in VFP and then copies to the GP register, so the
+ * VFP register usually still holds the right value. It cost us pedestrian
+ * voices playing at a fraction of speed — the game always set AL_PITCH to
+ * 1.0, but the hard-float callee was reading stale VFP contents like 20/127.
+ *
+ * pcs("aapcs") tells GCC to give these functions the base (soft-float) PCS,
+ * which fixes arguments AND return values. Functions taking a const float*
+ * (alSourcefv, alListenerfv, alGetSourcef, …) pass a pointer in a GP register
+ * and are already correct, so they are deliberately left alone.
+ */
+#define SOFTFP __attribute__((pcs("aapcs")))
+
+static void   (*real_alSourcef)(unsigned, int, float);
+static void   (*real_alSource3f)(unsigned, int, float, float, float);
+static void   (*real_alListenerf)(int, float);
+static void   (*real_alListener3f)(int, float, float, float);
+static void   (*real_alBufferf)(unsigned, int, float);
+static void   (*real_alBuffer3f)(unsigned, int, float, float, float);
+static void   (*real_alEffectf)(unsigned, int, float);
+static void   (*real_alFilterf)(unsigned, int, float);
+static void   (*real_alAuxiliaryEffectSlotf)(unsigned, int, float);
+static void   (*real_alDopplerFactor)(float);
+static void   (*real_alDopplerVelocity)(float);
+static void   (*real_alSpeedOfSound)(float);
+static void   (*real_alSourcedSOFT)(unsigned, int, double);
+static void   (*real_alSource3dSOFT)(unsigned, int, double, double, double);
+static float  (*real_alGetFloat)(int);
+static double (*real_alGetDouble)(int);
+
+SOFTFP static void al_alSourcef(unsigned s, int p, float v)
+    { real_alSourcef(s, p, v); }
+SOFTFP static void al_alSource3f(unsigned s, int p, float a, float b, float c)
+    { real_alSource3f(s, p, a, b, c); }
+SOFTFP static void al_alListenerf(int p, float v)
+    { real_alListenerf(p, v); }
+SOFTFP static void al_alListener3f(int p, float a, float b, float c)
+    { real_alListener3f(p, a, b, c); }
+SOFTFP static void al_alBufferf(unsigned b, int p, float v)
+    { real_alBufferf(b, p, v); }
+SOFTFP static void al_alBuffer3f(unsigned b, int p, float x, float y, float z)
+    { real_alBuffer3f(b, p, x, y, z); }
+SOFTFP static void al_alEffectf(unsigned e, int p, float v)
+    { real_alEffectf(e, p, v); }
+SOFTFP static void al_alFilterf(unsigned f, int p, float v)
+    { real_alFilterf(f, p, v); }
+SOFTFP static void al_alAuxiliaryEffectSlotf(unsigned a, int p, float v)
+    { real_alAuxiliaryEffectSlotf(a, p, v); }
+SOFTFP static void al_alDopplerFactor(float v)   { real_alDopplerFactor(v); }
+SOFTFP static void al_alDopplerVelocity(float v) { real_alDopplerVelocity(v); }
+SOFTFP static void al_alSpeedOfSound(float v)    { real_alSpeedOfSound(v); }
+SOFTFP static void al_alSourcedSOFT(unsigned s, int p, double v)
+    { real_alSourcedSOFT(s, p, v); }
+SOFTFP static void al_alSource3dSOFT(unsigned s, int p, double a, double b, double c)
+    { real_alSource3dSOFT(s, p, a, b, c); }
+SOFTFP static float  al_alGetFloat(int p)  { return real_alGetFloat(p); }
+SOFTFP static double al_alGetDouble(int p) { return real_alGetDouble(p); }
 
 /* Hook a symbol: look it up in both the game .so and system OpenAL, patch if found */
 static void hook_al(const char *name) {
@@ -148,5 +216,26 @@ void patch_openal(void) {
     for (int i = 0; al_symbols[i]; i++)
         hook_al(al_symbols[i]);
 
+    /* Soft-float thunks. These MUST come after the bulk loop above, which
+     * points these symbols straight at the hard-float system entry points. */
+    #define BRIDGE(name)                                                    \
+        do {                                                                \
+            real_##name = dlsym(libopenal, #name);                          \
+            uintptr_t gs = so_symbol(&gtactw_mod, #name);                   \
+            if (gs && real_##name) hook_addr(gs, (uintptr_t)al_##name);     \
+        } while (0)
+
+    BRIDGE(alSourcef);        BRIDGE(alSource3f);
+    BRIDGE(alListenerf);      BRIDGE(alListener3f);
+    BRIDGE(alBufferf);        BRIDGE(alBuffer3f);
+    BRIDGE(alEffectf);        BRIDGE(alFilterf);
+    BRIDGE(alAuxiliaryEffectSlotf);
+    BRIDGE(alDopplerFactor);  BRIDGE(alDopplerVelocity);
+    BRIDGE(alSpeedOfSound);
+    BRIDGE(alSourcedSOFT);    BRIDGE(alSource3dSOFT);
+    BRIDGE(alGetFloat);       BRIDGE(alGetDouble);
+    #undef BRIDGE
+
+    fprintf(stderr, "patch_openal: soft-float bridges installed\n");
     fflush(stderr);
 }

@@ -47,6 +47,25 @@ static int mpg123_set_filesize32(mpg123_handle *mh, int32_t filesize) {
     return mpg123_set_filesize(mh, (off_t)filesize);
 }
 
+/* ── soft-float ABI bridges ──────────────────────────────────────────────
+ *
+ * libCTW.so is armeabi-v7a = soft-float, so a double argument arrives as an
+ * aligned r2:r3 register PAIR. This binary is hard-float and expects it in
+ * d0. These three mpg123 entry points are the only ones taking a float or
+ * double BY VALUE; everything else takes ints or pointers and is unaffected.
+ * (The same class of bug made pedestrian voices play at a fraction of speed
+ * through OpenAL — see src/openal_patch.c.)
+ */
+#define SOFTFP __attribute__((pcs("aapcs")))
+
+SOFTFP static int mpg123_volume_abi(mpg123_handle *mh, double vol)
+    { return mpg123_volume(mh, vol); }
+SOFTFP static int mpg123_volume_change_abi(mpg123_handle *mh, double change)
+    { return mpg123_volume_change(mh, change); }
+SOFTFP static int mpg123_eq_abi(mpg123_handle *mh, enum mpg123_channels ch,
+                                int band, double val)
+    { return mpg123_eq(mh, ch, band, val); }
+
 static void hook_mpg(const char *name, uintptr_t impl) {
     uintptr_t sym = so_symbol(&gtactw_mod, name);
     if (sym) hook_addr(sym, impl);
@@ -68,7 +87,7 @@ void patch_mpg123(void) {
     hook_mpg("mpg123_enc_from_id3",            (uintptr_t)mpg123_enc_from_id3);
     hook_mpg("mpg123_encodings",               (uintptr_t)mpg123_encodings);
     hook_mpg("mpg123_encsize",                 (uintptr_t)mpg123_encsize);
-    hook_mpg("mpg123_eq",                      (uintptr_t)mpg123_eq);
+    hook_mpg("mpg123_eq",                      (uintptr_t)mpg123_eq_abi);
     hook_mpg("mpg123_errcode",                 (uintptr_t)mpg123_errcode);
     hook_mpg("mpg123_exit",                    (uintptr_t)mpg123_exit);
     hook_mpg("mpg123_feature",                 (uintptr_t)mpg123_feature);
@@ -137,6 +156,6 @@ void patch_mpg123(void) {
     hook_mpg("mpg123_tellframe",               (uintptr_t)mpg123_tellframe);
     hook_mpg("mpg123_timeframe",               (uintptr_t)mpg123_timeframe);
     hook_mpg("mpg123_tpf",                     (uintptr_t)mpg123_tpf);
-    hook_mpg("mpg123_volume",                  (uintptr_t)mpg123_volume);
-    hook_mpg("mpg123_volume_change",           (uintptr_t)mpg123_volume_change);
+    hook_mpg("mpg123_volume",                  (uintptr_t)mpg123_volume_abi);
+    hook_mpg("mpg123_volume_change",           (uintptr_t)mpg123_volume_change_abi);
 }

@@ -1248,131 +1248,136 @@ static void segv_handler(int sig, siginfo_t *si, void *uc) {
     raise(sig);
 }
 
-/* ── Patch glibc __clock_gettime64 via 8-byte Thumb2 trampoline ────────────
- * On this device (RK3566/ArkOS ARM32) glibc's __clock_gettime64 has NULL vDSO
- * pointers AND may be entered with LR=0 (no valid return address) plus an
- * invalid timespec pointer.  Both cases crash the original function.
+/* ── Conditional libc time-function patching ───────────────────────────────
+ * History: one device (RK3566/dArkOS ARM32) shipped a glibc whose
+ * __clock_gettime64 / __gettimeofday64 dispatched through a NULL vDSO pointer
+ * and jumped to PC=0 (SIGSEGV).  The workaround overwrote the function's
+ * prologue with a trampoline into our own direct-syscall implementation.
  *
- * We install an 8-byte Thumb2 trampoline at fn+0 that jumps directly to our
- * clock_gettime64_safe() (clock_fix.c), which:
- *   — does the syscall safely (skips writes to invalid tp pointers)
- *   — calls pthread_exit(NULL) when LR=0 so the thread exits cleanly
+ * That workaround was UNCONDITIONAL, and on mainstream glibc (AmberELEC
+ * RG351MP glibc 2.38, ROCKNIX glibc 2.41 — GitHub issues #1, #3) the native
+ * function works perfectly.  Overwriting a healthy prologue then crashes with
+ * SIGILL / ILL_ILLOPC at fn+0 (the trampoline bytes get decoded in the wrong
+ * instruction set: our Thumb2 bytes over an ARM-mode libc function).
  *
- * Trampoline layout (fn+0):
- *   df f8 00 f0   ldr.w pc, [pc, #0]   ; PC during T32 = instruction+4
- *   XX XX XX XX   <4-byte target addr with Thumb bit set>
- */
-static void patch_libc_clock64(void) {
-    void *libc = dlopen("libc.so.6", RTLD_LAZY | RTLD_NOLOAD);
-    if (!libc) {
-        fprintf(stderr, "patch_libc_clock64: libc.so.6 not found via dlopen\n");
-        return;
+ * Fix: probe the native function once, under a temporary SIGILL/SIGSEGV/SIGBUS
+ * guard, BEFORE any threads are spawned.  Patch only if the native call
+ * actually faults.  Healthy devices keep their untouched libc; the one broken
+ * device still gets the trampoline.  The trampoline encoding is also made
+ * ISA-aware (ARM vs Thumb2) as defence-in-depth for the fault branch. */
+
+static sigjmp_buf            probe_jmp;
+static volatile sig_atomic_t probe_faulted;
+
+static void probe_fault_handler(int sig) {
+    (void)sig;
+    probe_faulted = 1;
+    siglongjmp(probe_jmp, 1);
+}
+
+/* Call fn(a0, a1) under a fault guard.  Returns 1 if it faulted, else 0.
+ * MUST run single-threaded (installs process-wide signal handlers). */
+static int libc_time_fn_faults(void *fn, long a0, long a1) {
+    struct sigaction sa, old_ill, old_segv, old_bus;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = probe_fault_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGILL,  &sa, &old_ill);
+    sigaction(SIGSEGV, &sa, &old_segv);
+    sigaction(SIGBUS,  &sa, &old_bus);
+
+    probe_faulted = 0;
+    if (sigsetjmp(probe_jmp, 1) == 0) {
+        int (*f)(long, long) = (int (*)(long, long))fn;
+        f(a0, a1);
     }
-    void *sym = dlsym(libc, "__clock_gettime64");
-    dlclose(libc);
-    if (!sym) {
-        fprintf(stderr, "patch_libc_clock64: __clock_gettime64 not in libc\n");
-        return;
+
+    sigaction(SIGILL,  &old_ill,  NULL);
+    sigaction(SIGSEGV, &old_segv, NULL);
+    sigaction(SIGBUS,  &old_bus,  NULL);
+    return (int)probe_faulted;
+}
+
+/* Overwrite the prologue at `sym` with a literal-load branch to `target_fn`.
+ * ISA of the branch matches the ISA of `sym` (Thumb bit in the symbol value);
+ * `target_fn`'s own Thumb bit is preserved so interworking is correct.       */
+static void install_time_trampoline(void *sym, void *target_fn, const char *name) {
+    uint8_t  *fn     = (uint8_t *)((uintptr_t)sym & ~1u);   /* strip Thumb bit */
+    int       thumb  = (uintptr_t)sym & 1u;                 /* target ISA of sym */
+    uintptr_t target = (uintptr_t)target_fn;               /* keep its Thumb bit */
+
+    uint8_t trampoline[8];
+    if (thumb) {
+        /* Thumb2:  ldr.w pc, [pc, #0]   (T3 literal load into PC) */
+        trampoline[0] = 0xDF; trampoline[1] = 0xF8;
+        trampoline[2] = 0x00; trampoline[3] = 0xF0;
+    } else {
+        /* ARM:     ldr pc, [pc, #-4]    (e51ff004) — loads the word that
+         * immediately follows; LDR-into-PC interworks on ARMv5T+, so a
+         * Thumb target address (bit0=1) switches state correctly. */
+        trampoline[0] = 0x04; trampoline[1] = 0xF0;
+        trampoline[2] = 0x1F; trampoline[3] = 0xE5;
     }
-
-    uint8_t *fn = (uint8_t *)((uintptr_t)sym & ~1u); /* strip Thumb bit */
-
-    /* Target must have Thumb bit set so the CPU stays in Thumb mode after
-     * the indirect branch via LDR PC.                                      */
-    uintptr_t target = (uintptr_t)(void *)clock_gettime64_safe | 1u;
-
-    uint8_t trampoline[8] = {
-        /* ldr.w pc, [pc, #0]  — Thumb2 T3 literal load into PC */
-        0xDF, 0xF8, 0x00, 0xF0,
-        /* 4-byte little-endian absolute target address */
-        (uint8_t)(target),        (uint8_t)(target >> 8),
-        (uint8_t)(target >> 16),  (uint8_t)(target >> 24),
-    };
+    trampoline[4] = (uint8_t)(target);
+    trampoline[5] = (uint8_t)(target >> 8);
+    trampoline[6] = (uint8_t)(target >> 16);
+    trampoline[7] = (uint8_t)(target >> 24);
 
     uintptr_t pgsz = 4096;
     uintptr_t page = (uintptr_t)fn & ~(pgsz - 1u);
     if (mprotect((void *)page, pgsz, PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
-        fprintf(stderr, "patch_libc_clock64: mprotect failed: %s\n", strerror(errno));
+        fprintf(stderr, "%s: mprotect failed: %s\n", name, strerror(errno));
         return;
     }
     memcpy(fn, trampoline, 8);
     __builtin___clear_cache((char *)fn, (char *)fn + 8);
     mprotect((void *)page, pgsz, PROT_READ | PROT_EXEC);
-    fprintf(stderr,
-        "patch_libc_clock64: trampoline @ %p -> clock_gettime64_safe @ %p\n",
-        (void *)fn, (void *)clock_gettime64_safe);
+    fprintf(stderr, "%s: %s-mode trampoline @ %p -> %p\n",
+            name, thumb ? "Thumb" : "ARM", (void *)fn, target_fn);
+}
+
+/* Look up `symname` in libc; probe it; patch only if the native call faults. */
+static void patch_libc_time_fn(const char *symname, void *target_fn,
+                               long a0, long a1, const char *name) {
+    void *libc = dlopen("libc.so.6", RTLD_LAZY | RTLD_NOLOAD);
+    if (!libc) {
+        fprintf(stderr, "%s: libc.so.6 not found via dlopen\n", name);
+        return;
+    }
+    void *sym = dlsym(libc, symname);
+    dlclose(libc);
+    if (!sym) {
+        fprintf(stderr, "%s: %s not in libc\n", name, symname);
+        return;
+    }
+
+    if (!libc_time_fn_faults(sym, a0, a1)) {
+        fprintf(stderr, "%s: native %s works, leaving libc untouched\n",
+                name, symname);
+        return;
+    }
+    fprintf(stderr, "%s: native %s FAULTS, installing trampoline\n",
+            name, symname);
+    install_time_trampoline(sym, target_fn, name);
+}
+
+/* Probe scratch buffers: sized for the largest 64-bit-time struct glibc uses. */
+static long probe_buf[4];
+
+static void patch_libc_clock64(void) {
+    patch_libc_time_fn("__clock_gettime64", (void *)clock_gettime64_safe,
+                       (long)CLOCK_MONOTONIC, (long)probe_buf,
+                       "patch_libc_clock64");
 }
 
 static void patch_libc_gettimeofday64(void) {
-    void *libc = dlopen("libc.so.6", RTLD_LAZY | RTLD_NOLOAD);
-    if (!libc) {
-        fprintf(stderr, "patch_libc_gettimeofday64: libc.so.6 not found via dlopen\n");
-        return;
-    }
-    void *sym = dlsym(libc, "__gettimeofday64");
-    dlclose(libc);
-    if (!sym) {
-        fprintf(stderr, "patch_libc_gettimeofday64: __gettimeofday64 not in libc\n");
-        return;
-    }
-
-    uint8_t *fn = (uint8_t *)((uintptr_t)sym & ~1u);
-    uintptr_t target = (uintptr_t)(void *)gettimeofday64_safe | 1u;
-
-    uint8_t trampoline[8] = {
-        0xDF, 0xF8, 0x00, 0xF0,
-        (uint8_t)(target),        (uint8_t)(target >> 8),
-        (uint8_t)(target >> 16),  (uint8_t)(target >> 24),
-    };
-
-    uintptr_t pgsz = 4096;
-    uintptr_t page = (uintptr_t)fn & ~(pgsz - 1u);
-    if (mprotect((void *)page, pgsz, PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
-        fprintf(stderr, "patch_libc_gettimeofday64: mprotect failed: %s\n", strerror(errno));
-        return;
-    }
-    memcpy(fn, trampoline, 8);
-    __builtin___clear_cache((char *)fn, (char *)fn + 8);
-    mprotect((void *)page, pgsz, PROT_READ | PROT_EXEC);
-    fprintf(stderr,
-        "patch_libc_gettimeofday64: trampoline @ %p -> gettimeofday64_safe @ %p\n",
-        (void *)fn, (void *)gettimeofday64_safe);
+    patch_libc_time_fn("__gettimeofday64", (void *)gettimeofday64_safe,
+                       (long)probe_buf, 0, "patch_libc_gettimeofday64");
 }
 
 static void patch_libc_gettimeofday(void) {
-    void *libc = dlopen("libc.so.6", RTLD_LAZY | RTLD_NOLOAD);
-    if (!libc) {
-        fprintf(stderr, "patch_libc_gettimeofday: libc.so.6 not found\n");
-        return;
-    }
-    void *sym = dlsym(libc, "gettimeofday");
-    dlclose(libc);
-    if (!sym) {
-        fprintf(stderr, "patch_libc_gettimeofday: gettimeofday not in libc\n");
-        return;
-    }
-
-    uint8_t *fn = (uint8_t *)((uintptr_t)sym & ~1u);
-    uintptr_t target = (uintptr_t)(void *)gettimeofday_safe | 1u;
-
-    uint8_t trampoline[8] = {
-        0xDF, 0xF8, 0x00, 0xF0,
-        (uint8_t)(target),        (uint8_t)(target >> 8),
-        (uint8_t)(target >> 16),  (uint8_t)(target >> 24),
-    };
-
-    uintptr_t pgsz = 4096;
-    uintptr_t page = (uintptr_t)fn & ~(pgsz - 1u);
-    if (mprotect((void *)page, pgsz, PROT_READ | PROT_WRITE | PROT_EXEC) < 0) {
-        fprintf(stderr, "patch_libc_gettimeofday: mprotect failed: %s\n", strerror(errno));
-        return;
-    }
-    memcpy(fn, trampoline, 8);
-    __builtin___clear_cache((char *)fn, (char *)fn + 8);
-    mprotect((void *)page, pgsz, PROT_READ | PROT_EXEC);
-    fprintf(stderr,
-        "patch_libc_gettimeofday: trampoline @ %p -> gettimeofday_safe @ %p\n",
-        (void *)fn, (void *)gettimeofday_safe);
+    patch_libc_time_fn("gettimeofday", (void *)gettimeofday_safe,
+                       (long)probe_buf, 0, "patch_libc_gettimeofday");
 }
 
 /* ── main ────────────────────────────────────────────────────────────────── */
