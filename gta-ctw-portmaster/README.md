@@ -89,6 +89,46 @@ back to English and is noted in `gtactw.log`.
 No extra download is needed — all six languages are already inside the GXT that
 the installer extracts from your APK.
 
+## Display server (KMS/DRM vs. Wayland)
+
+Most CFWs boot straight to a bare KMS console, and the port takes the screen
+for itself: it asks SDL for the **`kmsdrm`** backend, unbinds the framebuffer
+console and draws directly to the panel. That is the default and needs no
+configuration.
+
+Some images — notably ROCKNIX/dArkOS builds that run **Sway** — already have a
+Wayland compositor holding the DRM master. There `kmsdrm` cannot open the
+device at all (`SDL_Init: kmsdrm not available`). The launcher now detects a
+running compositor (via `$WAYLAND_DISPLAY`, or by finding its socket in
+`$XDG_RUNTIME_DIR` when the frontend launches the port with a stripped
+environment), switches SDL to the **`wayland`** backend, and skips the whole
+console/DRM takeover — under a compositor the framebuffer is not the port's to
+seize.
+
+To force a backend, create a single-line file:
+
+```
+<ports>/GTA Chinatown Wars/gtactw/conf/videodriver.txt
+```
+
+containing e.g. `wayland`, `kmsdrm` or `x11`. A pre-set `$SDL_VIDEODRIVER` in
+the environment is also honoured. The value actually used is recorded at the
+top of `gtactw.log`:
+
+```
+launcher: SDL_VIDEODRIVER=wayland OWNS_DISPLAY=0
+```
+
+`OWNS_DISPLAY=1` means the port took the console (kmsdrm); `0` means a
+compositor owns it and the port left the console, the vtconsole bindings and
+`/dev/dri/*` untouched.
+
+On the `kmsdrm` path the launcher also pins `SDL_VIDEO_GL_DRIVER=libGLESv2.so`
+and `SDL_VIDEO_EGL_DRIVER=libEGL.so` — the proven values on the console-owning
+devices. Those bare names are dev-package symlinks, and a runtime-only image may
+ship only `libGLESv2.so.2`/`libEGL.so.1`, so on the Wayland path they are left
+unset and SDL uses its own EGL/GL loading.
+
 ## Device compatibility
 
 - **Architecture:** 32-bit `armhf` only. The launcher sets `PORT_32BIT="Y"` so
@@ -105,6 +145,10 @@ the installer extracts from your APK.
   ports path — not just `/roms/ports`.
 - **Resolution:** renders at a fixed **640×480** (baked into the engine). On
   higher-res panels the firmware scales/letterboxes it.
+- **Root / no `sudo`:** some images run as root and ship no `sudo` binary. The
+  launcher no longer assumes `sudo` exists — as root it drops the prefix
+  entirely, and as a normal user it only uses `sudo` if it is actually
+  installed.
 
 ### Bundled libraries (`gtactw/libs.armhf/`)
 
