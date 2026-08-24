@@ -41,7 +41,14 @@ if [ "$(id -u)" -eq 0 ]; then
     ESUDO=""
 elif [ -z "${ESUDO+x}" ]; then
     if command -v sudo >/dev/null 2>&1; then ESUDO="sudo"; else ESUDO=""; fi
-elif [ -n "$ESUDO" ] && ! command -v "$ESUDO" >/dev/null 2>&1; then
+elif [ -n "$ESUDO" ] && ! command -v "${ESUDO%% *}" >/dev/null 2>&1; then
+    # First WORD only. PortMaster's control.txt does not set a bare command
+    # name here -- on dArkOS it is
+    #   ESUDO="sudo --preserve-env=SDL_GAMECONTROLLERCONFIG_FILE,DEVICE,..."
+    # and testing the whole string with command -v looks up one executable with
+    # that impossible name, finds nothing, and wrongly blanks a perfectly good
+    # ESUDO. Everything privileged then runs unprivileged and fails, including
+    # the frontend restart in _cleanup -- i.e. a dead screen.
     ESUDO=""
 fi
 DEVICE_ARCH="${DEVICE_ARCH:-armhf}"

@@ -43,7 +43,9 @@ run_rig() {
 
     # Stub every privileged command: log the call, do nothing.
     local c
-    for c in sudo chmod tee systemctl pidof kill; do
+    # pkill/pgrep matter because control.txt's own pm_finish calls them; an
+    # unstubbed pkill would run for real against the device.
+    for c in sudo chmod tee systemctl pidof kill pkill pgrep; do
         { echo '#!/bin/bash'
           echo "echo \"CALL: $c \$*\" >> \"$rig/trace\""
           [ "$c" = tee ] && echo 'cat > /dev/null'
